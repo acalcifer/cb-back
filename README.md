@@ -96,6 +96,7 @@ Email and password today, with the storage schema already shaped for passkeys.
 | POST   | `/api/rooms`            | session   | Create a room (server generates the slug) |
 | GET    | `/api/rooms`            | session   | Public room directory, newest first      |
 | GET    | `/api/rooms/{slug}`     | session   | Resolve an invitation slug               |
+| DELETE | `/api/rooms/{slug}`     | session   | Delete a room (any signed-in user)       |
 | GET    | `/ws?room={slug}`       | session   | Websocket upgrade into a room            |
 | GET    | `/healthz`              | –         | Liveness plus connected client count     |
 | GET    | `/readyz`               | –         | Checks Postgres and Redis                |
@@ -121,6 +122,13 @@ characters so they survive being read aloud.
 
 Each directory row carries the creator's display name, never their email
 address, so the list is readable without becoming a user-enumeration endpoint.
+
+Deletion is open to any signed-in user, matching the open directory: shared
+housekeeping for a shared list. The trade-off is that someone can remove a room
+others are using — restricting it to the creator is a one-line change to the
+query if that becomes a problem. Deleting does not disconnect anyone already in
+the room; their websockets stay up until they leave, and the room simply stops
+appearing in the directory and can no longer be joined.
 There is deliberately no private-room concept yet: if one is added, it belongs
 in a `visibility` column plus a `room_members` table, and the directory query
 becomes the place that enforces it.
@@ -187,9 +195,18 @@ curl -X POST localhost:8080/api/auth/register \
 ```sh
 go test -race ./...        # unit tests; integration tests skip
 
-# with docker compose up:
+# with docker compose up — .env already points TEST_* at isolated storage:
 set -a; . ./.env; set +a
-TEST_DATABASE_URL="$DATABASE_URL" TEST_REDIS_URL="$REDIS_URL" go test -race ./...
+go test -race ./...
+```
+
+The integration tests create real users and rooms, so they run against a
+separate `cbback_test` database and Redis index 1. Pointing them at the
+development database instead fills the room directory with fixtures. The
+database is created on first `docker compose up`; on an existing volume:
+
+```sh
+docker compose exec postgres createdb -U cbback cbback_test
 ```
 
 The auth integration tests run against the compose Postgres and Redis and

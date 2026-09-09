@@ -26,6 +26,7 @@ func (h *Handlers) Routes(mux *http.ServeMux, require func(http.Handler) http.Ha
 	mux.Handle("POST /api/rooms", require(http.HandlerFunc(h.create)))
 	mux.Handle("GET /api/rooms", require(http.HandlerFunc(h.list)))
 	mux.Handle("GET /api/rooms/{slug}", require(http.HandlerFunc(h.bySlug)))
+	mux.Handle("DELETE /api/rooms/{slug}", require(http.HandlerFunc(h.delete)))
 }
 
 type createRequest struct {
@@ -79,6 +80,29 @@ func (h *Handlers) list(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.JSON(w, h.logger, http.StatusOK, map[string]any{"rooms": list})
+}
+
+// delete removes a room. Any signed-in user may delete any room: the directory
+// is shared, so tidying it is shared too. The trade-off is that someone can
+// remove a room others are using — if that becomes a problem, restricting it to
+// the creator is a one-line change to the query.
+func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.FromContext(r.Context()); !ok {
+		httpx.Error(w, h.logger, http.StatusUnauthorized, "unauthenticated", "")
+		return
+	}
+
+	if err := h.svc.Delete(r.Context(), r.PathValue("slug")); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpx.Error(w, h.logger, http.StatusNotFound, "room_not_found", "no such room")
+			return
+		}
+		h.logger.Error("delete room failed", "error", err)
+		httpx.Error(w, h.logger, http.StatusInternalServerError, "internal_error", "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // bySlug resolves an invitation link. Any authenticated user may resolve any

@@ -66,6 +66,17 @@ func (s *Service) BySlug(ctx context.Context, slug string) (Room, error) {
 	return s.store.BySlug(ctx, strings.ToLower(strings.TrimSpace(slug)))
 }
 
+// Delete removes a room.
+//
+// Any signed-in user may delete any room, matching the open access model: the
+// directory is shared, so its housekeeping is shared too. Note that this does
+// not disconnect anyone already in the room — their websockets stay up until
+// they leave; the room simply disappears from the directory and can no longer
+// be joined.
+func (s *Service) Delete(ctx context.Context, slug string) error {
+	return s.store.DeleteBySlug(ctx, strings.ToLower(strings.TrimSpace(slug)))
+}
+
 func (s *Service) List(ctx context.Context) ([]Room, error) {
 	return s.store.List(ctx, listLimit)
 }

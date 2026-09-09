@@ -72,6 +72,19 @@ func (s *Store) BySlug(ctx context.Context, slug string) (Room, error) {
 	return r, nil
 }
 
+// DeleteBySlug removes a room. Reports ErrNotFound when nothing matched, so a
+// repeated delete is a 404 rather than a silent success.
+func (s *Store) DeleteBySlug(ctx context.Context, slug string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM rooms WHERE slug = $1`, slug)
+	if err != nil {
+		return fmt.Errorf("delete room: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // List returns the public room directory, newest first.
 //
 // Every room is visible to every signed-in user: the directory is how someone

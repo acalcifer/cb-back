@@ -358,3 +358,60 @@ func TestOverlongNameRejected(t *testing.T) {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 }
+
+func TestDeleteRemovesTheRoom(t *testing.T) {
+	ts := newTestServer(t)
+	cookie := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Temp"}, cookie))
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: status = %d, want 204", resp.StatusCode)
+	}
+	if resp := ts.do(t, http.MethodGet, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("room still resolves after delete: status = %d", resp.StatusCode)
+	}
+}
+
+// Deleting twice must not report success the second time, or a client cannot
+// tell a real deletion from a stale link.
+func TestDeleteIsNotSilentlyIdempotent(t *testing.T) {
+	ts := newTestServer(t)
+	cookie := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", nil, cookie))
+	ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, cookie)
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second delete: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// Housekeeping is shared, matching the open directory: anyone signed in may
+// remove any room, including one they did not create.
+func TestAnySignedInUserCanDeleteAnyRoom(t *testing.T) {
+	ts := newTestServer(t)
+
+	owner := ts.signIn(t)
+	stranger := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Shared"}, owner))
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, stranger); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("stranger delete: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestDeleteRequiresASession(t *testing.T) {
+	ts := newTestServer(t)
+	cookie := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", nil, cookie))
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous delete: status = %d, want 401", resp.StatusCode)
+	}
+	if resp := ts.do(t, http.MethodGet, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusOK {
+		t.Fatal("the room was removed by an unauthenticated request")
+	}
+}
