@@ -12,6 +12,7 @@ const (
 	TypeAnswer    = "answer"
 	TypeCandidate = "candidate"
 	TypeBye       = "bye"
+	TypeChat      = "chat"
 )
 
 // Message types only the server emits.
@@ -32,8 +33,8 @@ type Peer struct {
 // Inbound is what a client sends.
 //
 // There is deliberately no "from" field: the server stamps the sender itself.
-// A client that could name its own sender could inject an SDP offer as someone
-// else in the room, which in a calls product means impersonating a participant.
+// A client that could name its own sender could inject an SDP offer — or a
+// chat message — as someone else in the room.
 type Inbound struct {
 	Type string `json:"type"`
 	// To addresses one peer by user id. Empty means the whole room, which is
@@ -61,7 +62,7 @@ func parseInbound(data []byte) (Inbound, error) {
 	}
 
 	switch in.Type {
-	case TypeOffer, TypeAnswer, TypeCandidate, TypeBye:
+	case TypeOffer, TypeAnswer, TypeCandidate, TypeBye, TypeChat:
 	default:
 		return Inbound{}, fmt.Errorf("%w: %q", errUnknownType, in.Type)
 	}

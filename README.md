@@ -124,7 +124,7 @@ becomes the place that enforces it.
 Clients send:
 
 ```json
-{ "type": "offer|answer|candidate|bye", "to": "<peer user id>", "payload": { } }
+{ "type": "offer|answer|candidate|bye|chat", "to": "<peer user id>", "payload": { } }
 ```
 
 `to` is optional; omitting it fans the message out to the whole room, which is
@@ -136,9 +136,20 @@ what a client does before it knows who is present. The server sends:
 
 **`from` is stamped by the server** from the authenticated connection, and any
 `from` in a client's own frame is discarded. A client that could name its own
-sender could inject an SDP offer as another participant. Unknown message types
-are rejected rather than relayed, so the set of frames that can cross the hub
-is exactly the set above.
+sender could inject an SDP offer — or a chat message — as another participant.
+Unknown message types are rejected rather than relayed, so the set of frames
+that can cross the hub is exactly the set above.
+
+`chat` rides the same relay as the WebRTC frames. Chat is **not persisted**: it
+lives for the duration of the connection, like the chat panel in a meeting. If
+history is wanted later it needs its own table, and the relay becomes a write
+plus a fan-out rather than a fan-out alone.
+
+Each connection has an inbound message budget: a burst of 120 with sustained
+refill at 60/second. ICE candidates arrive in bursts of tens during
+negotiation, so a real call never approaches it. A connection that does is
+closed rather than silently throttled, because a dropped ICE candidate breaks a
+call in a way that is very hard to diagnose from the client.
 
 On top of the relay the server emits presence, without which a client would not
 know whom to call: `welcome` (sent on join, listing everyone already present),
