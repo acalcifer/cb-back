@@ -21,11 +21,14 @@ var (
 )
 
 type Room struct {
-	ID        string    `json:"id"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string `json:"id"`
+	Slug      string `json:"slug"`
+	Name      string `json:"name"`
+	CreatedBy string `json:"created_by"`
+	// CreatedByName is shown in the public directory so a room has a
+	// recognisable owner without exposing the creator's email address.
+	CreatedByName string    `json:"created_by_name,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type Store struct {
@@ -69,12 +72,18 @@ func (s *Store) BySlug(ctx context.Context, slug string) (Room, error) {
 	return r, nil
 }
 
-func (s *Store) ListByCreator(ctx context.Context, userID string, limit int) ([]Room, error) {
+// List returns the public room directory, newest first.
+//
+// Every room is visible to every signed-in user: the directory is how someone
+// finds a call to join. The creator's display name travels with each row so the
+// list is readable without a second lookup, but their email never does.
+func (s *Store) List(ctx context.Context, limit int) ([]Room, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, slug, name, created_by::text, created_at
-		FROM rooms WHERE created_by = $1
-		ORDER BY created_at DESC
-		LIMIT $2`, userID, limit)
+		SELECT r.id::text, r.slug, r.name, r.created_by::text, u.display_name, r.created_at
+		FROM rooms r
+		JOIN users u ON u.id = r.created_by
+		ORDER BY r.created_at DESC
+		LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select rooms: %w", err)
 	}
@@ -84,7 +93,7 @@ func (s *Store) ListByCreator(ctx context.Context, userID string, limit int) ([]
 	list := make([]Room, 0)
 	for rows.Next() {
 		var r Room
-		if err := rows.Scan(&r.ID, &r.Slug, &r.Name, &r.CreatedBy, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Slug, &r.Name, &r.CreatedBy, &r.CreatedByName, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan room: %w", err)
 		}
 		list = append(list, r)

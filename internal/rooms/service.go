@@ -66,8 +66,8 @@ func (s *Service) BySlug(ctx context.Context, slug string) (Room, error) {
 	return s.store.BySlug(ctx, strings.ToLower(strings.TrimSpace(slug)))
 }
 
-func (s *Service) ListByCreator(ctx context.Context, userID string) ([]Room, error) {
-	return s.store.ListByCreator(ctx, userID, listLimit)
+func (s *Service) List(ctx context.Context) ([]Room, error) {
+	return s.store.List(ctx, listLimit)
 }
 
 func generateSlug() (string, error) {

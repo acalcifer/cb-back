@@ -90,7 +90,7 @@ Email and password today, with the storage schema already shaped for passkeys.
 | POST   | `/api/auth/password`    | session   | Change password; revokes other sessions  |
 | POST   | `/api/auth/ws-ticket`   | session   | Mint a 30-second single-use ws ticket    |
 | POST   | `/api/rooms`            | session   | Create a room (server generates the slug) |
-| GET    | `/api/rooms`            | session   | Rooms you created                        |
+| GET    | `/api/rooms`            | session   | Public room directory, newest first      |
 | GET    | `/api/rooms/{slug}`     | session   | Resolve an invitation slug               |
 | GET    | `/ws?room={slug}`       | session   | Websocket upgrade into a room            |
 | GET    | `/healthz`              | –         | Liveness plus connected client count     |
@@ -109,11 +109,17 @@ which rooms exist.
 A room scopes the relay: a message reaches only clients connected to the same
 room, so two calls can run at once without hearing each other.
 
-**Access model — knowing the slug is the invitation**, like a meeting link. Any
-authenticated user holding a slug may join. That is why slugs are generated
-rather than chosen: a user-picked slug would be guessable, and guessing one is
-how an uninvited participant would join a call. Slugs avoid vowels and
-look-alike characters, so they survive being read aloud.
+**Access model — rooms are public.** Every signed-in user sees every room in the
+directory and may join any of them; the directory is how someone finds a call.
+Slugs are still generated rather than chosen, so a link can be shared directly
+without colliding with an existing room, and they avoid vowels and look-alike
+characters so they survive being read aloud.
+
+Each directory row carries the creator's display name, never their email
+address, so the list is readable without becoming a user-enumeration endpoint.
+There is deliberately no private-room concept yet: if one is added, it belongs
+in a `visibility` column plus a `room_members` table, and the directory query
+becomes the place that enforces it.
 
 Clients send:
 

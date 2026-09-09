@@ -236,14 +236,16 @@ func TestEmptyBodyGetsADefaultName(t *testing.T) {
 	}
 }
 
-func TestListReturnsOnlyYourOwnRooms(t *testing.T) {
+// The directory is public: a user must be able to see rooms they did not
+// create, or there is nothing to join.
+func TestListIsAPublicDirectory(t *testing.T) {
 	ts := newTestServer(t)
 
 	mine := ts.signIn(t)
 	theirs := ts.signIn(t)
 
-	created := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Mine"}, mine))
-	ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Theirs"}, theirs)
+	ownRoom := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Mine"}, mine))
+	otherRoom := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Theirs"}, theirs))
 
 	resp := ts.do(t, http.MethodGet, "/api/rooms", nil, mine)
 	if resp.StatusCode != http.StatusOK {
@@ -254,8 +256,38 @@ func TestListReturnsOnlyYourOwnRooms(t *testing.T) {
 		Rooms []Room `json:"rooms"`
 	}](t, resp)
 
-	if len(list.Rooms) != 1 || list.Rooms[0].ID != created.ID {
-		t.Fatalf("rooms = %+v, want only the caller's own room", list.Rooms)
+	found := make(map[string]Room, len(list.Rooms))
+	for _, r := range list.Rooms {
+		found[r.ID] = r
+	}
+
+	if _, ok := found[ownRoom.ID]; !ok {
+		t.Fatal("directory omitted the caller's own room")
+	}
+	other, ok := found[otherRoom.ID]
+	if !ok {
+		t.Fatal("directory omitted another user's room; it is supposed to be public")
+	}
+	if other.CreatedByName == "" {
+		t.Fatal("directory row has no creator name to display")
+	}
+}
+
+// The directory is readable, but it must not turn into a user-enumeration
+// endpoint: display names are fine, email addresses are not.
+func TestDirectoryDoesNotLeakEmailAddresses(t *testing.T) {
+	ts := newTestServer(t)
+
+	cookie := ts.signIn(t)
+	ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Public"}, cookie)
+
+	resp := ts.do(t, http.MethodGet, "/api/rooms", nil, cookie)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if bytes.Contains(body, []byte("@example.com")) {
+		t.Fatalf("directory response contains an email address: %s", body)
 	}
 }
 

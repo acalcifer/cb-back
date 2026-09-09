@@ -62,14 +62,16 @@ func (h *Handlers) create(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, h.logger, http.StatusCreated, room)
 }
 
+// list is the public room directory: every signed-in user sees every room, so
+// they have something to join. It still requires a session — an anonymous
+// caller has no way to join a call anyway.
 func (h *Handlers) list(w http.ResponseWriter, r *http.Request) {
-	id, ok := auth.FromContext(r.Context())
-	if !ok {
+	if _, ok := auth.FromContext(r.Context()); !ok {
 		httpx.Error(w, h.logger, http.StatusUnauthorized, "unauthenticated", "")
 		return
 	}
 
-	list, err := h.svc.ListByCreator(r.Context(), id.User.ID)
+	list, err := h.svc.List(r.Context())
 	if err != nil {
 		h.logger.Error("list rooms failed", "error", err)
 		httpx.Error(w, h.logger, http.StatusInternalServerError, "internal_error", "")
