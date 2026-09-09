@@ -2,7 +2,6 @@ package signaling
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -34,6 +33,7 @@ type Client struct {
 	id          string
 	userID      string
 	displayName string
+	roomID      string
 	hub         *Hub
 	conn        *websocket.Conn
 	logger      *slog.Logger
@@ -47,23 +47,44 @@ type Authenticator interface {
 	AuthenticateWS(ctx context.Context, r *http.Request) (userID, displayName string, err error)
 }
 
+// ErrRoomNotFound tells the handler to answer 404. A resolver returns it for a
+// slug that does not exist.
+var ErrRoomNotFound = errors.New("signaling: room not found")
+
+// RoomResolver turns the ?room= slug from the URL into the room id the hub
+// keys on. It is a function rather than an interface so the rooms package and
+// the signaling package need not know about each other.
+type RoomResolver func(ctx context.Context, slug string) (roomID string, err error)
+
 type Handler struct {
-	hub      *Hub
-	logger   *slog.Logger
-	auth     Authenticator
-	upgrader websocket.Upgrader
+	hub         *Hub
+	logger      *slog.Logger
+	auth        Authenticator
+	resolveRoom RoomResolver
+	upgrader    websocket.Upgrader
 }
 
-func NewHandler(hub *Hub, logger *slog.Logger, checkOrigin func(*http.Request) bool, auth Authenticator) *Handler {
+func NewHandler(hub *Hub, logger *slog.Logger, checkOrigin func(*http.Request) bool, auth Authenticator, resolveRoom RoomResolver) *Handler {
 	return &Handler{
-		hub:    hub,
-		logger: logger,
-		auth:   auth,
+		hub:         hub,
+		logger:      logger,
+		auth:        auth,
+		resolveRoom: resolveRoom,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin:     checkOrigin,
 		},
+	}
+}
+
+// fail writes a JSON error before the upgrade. Once the connection is hijacked
+// there is no way to send a status code, so every rejection happens here.
+func (h *Handler) fail(w http.ResponseWriter, status int, code string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if _, err := fmt.Fprintf(w, `{"error":%q}`, code); err != nil {
+		h.logger.Debug("write error response failed", "error", err)
 	}
 }
 
@@ -74,11 +95,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	userID, displayName, err := h.auth.AuthenticateWS(r.Context(), r)
 	if err != nil {
 		h.logger.Debug("websocket authentication failed", "error", err, "remote", r.RemoteAddr)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusUnauthorized)
-		if _, err := w.Write([]byte(`{"error":"unauthenticated"}`)); err != nil {
-			h.logger.Debug("write unauthorized response failed", "error", err)
+		h.fail(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+
+	slug := r.URL.Query().Get("room")
+	if slug == "" {
+		h.fail(w, http.StatusBadRequest, "room_required")
+		return
+	}
+
+	roomID, err := h.resolveRoom(r.Context(), slug)
+	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			h.fail(w, http.StatusNotFound, "room_not_found")
+			return
 		}
+		h.logger.Error("resolve room failed", "error", err, "room", slug)
+		h.fail(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
 
@@ -94,9 +128,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id:          id,
 		userID:      userID,
 		displayName: displayName,
+		roomID:      roomID,
 		hub:         h.hub,
 		conn:        conn,
-		logger:      h.logger.With("client", id, "user", userID, "remote", r.RemoteAddr),
+		logger:      h.logger.With("client", id, "user", userID, "room", roomID, "remote", r.RemoteAddr),
 		send:        make(chan []byte, sendBufferSize),
 	}
 
@@ -145,12 +180,22 @@ func (c *Client) readPump() {
 			return
 		}
 
-		if !json.Valid(data) {
-			c.logger.Debug("discarding malformed json", "bytes", len(data))
+		in, err := parseInbound(data)
+		if err != nil {
+			c.logger.Debug("discarding invalid message", "error", err, "bytes", len(data))
 			continue
 		}
 
-		c.hub.publish(message{data: data, sender: c})
+		// The sender is stamped here, from the authenticated connection. Any
+		// "from" a client put in its own payload is irrelevant: it never
+		// reaches a peer, so a client cannot pose as another participant.
+		out, err := encode(Outbound{Type: in.Type, From: c.userID, Payload: in.Payload})
+		if err != nil {
+			c.logger.Warn("encode outbound failed", "error", err)
+			continue
+		}
+
+		c.hub.publish(message{room: c.roomID, sender: c, to: in.To, data: out})
 	}
 }
 

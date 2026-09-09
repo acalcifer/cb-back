@@ -89,13 +89,56 @@ Email and password today, with the storage schema already shaped for passkeys.
 | POST   | `/api/auth/logout-all`  | session   | Revoke every session for the account     |
 | POST   | `/api/auth/password`    | session   | Change password; revokes other sessions  |
 | POST   | `/api/auth/ws-ticket`   | session   | Mint a 30-second single-use ws ticket    |
-| GET    | `/ws`                   | session   | Websocket upgrade                        |
+| POST   | `/api/rooms`            | session   | Create a room (server generates the slug) |
+| GET    | `/api/rooms`            | session   | Rooms you created                        |
+| GET    | `/api/rooms/{slug}`     | session   | Resolve an invitation slug               |
+| GET    | `/ws?room={slug}`       | session   | Websocket upgrade into a room            |
 | GET    | `/healthz`              | –         | Liveness plus connected client count     |
 | GET    | `/readyz`               | –         | Checks Postgres and Redis                |
 
 `/ws` accepts a cookie, a bearer token, or `?ticket=`. The ticket exists
 because browsers cannot set headers on a websocket handshake: it keeps a
 long-lived token out of a URL, where it would land in proxy and server logs.
+
+Authentication is checked before the room, so an unknown slug returns 401 to an
+unauthenticated caller rather than 404 — a 404 there would let anyone probe for
+which rooms exist.
+
+## Rooms and the signaling protocol
+
+A room scopes the relay: a message reaches only clients connected to the same
+room, so two calls can run at once without hearing each other.
+
+**Access model — knowing the slug is the invitation**, like a meeting link. Any
+authenticated user holding a slug may join. That is why slugs are generated
+rather than chosen: a user-picked slug would be guessable, and guessing one is
+how an uninvited participant would join a call. Slugs avoid vowels and
+look-alike characters, so they survive being read aloud.
+
+Clients send:
+
+```json
+{ "type": "offer|answer|candidate|bye", "to": "<peer user id>", "payload": { } }
+```
+
+`to` is optional; omitting it fans the message out to the whole room, which is
+what a client does before it knows who is present. The server sends:
+
+```json
+{ "type": "...", "from": "<user id>", "payload": { }, "peers": [ ] }
+```
+
+**`from` is stamped by the server** from the authenticated connection, and any
+`from` in a client's own frame is discarded. A client that could name its own
+sender could inject an SDP offer as another participant. Unknown message types
+are rejected rather than relayed, so the set of frames that can cross the hub
+is exactly the set above.
+
+On top of the relay the server emits presence, without which a client would not
+know whom to call: `welcome` (sent on join, listing everyone already present),
+`peer-joined`, and `peer-left`. `peer-left` also fires when a client is dropped
+for failing to drain its queue, so peers tear down the dead connection instead
+of waiting on it.
 
 ```sh
 curl -X POST localhost:8080/api/auth/register \
@@ -138,8 +181,6 @@ enumeration and token-storage properties described above.
   registration returns 409 on a duplicate address, which does reveal that the
   address is registered; per-IP registration limits are what currently keep
   that from being usable in bulk.
-- **Rooms.** Every connected client is in one global room, so two concurrent
-  calls would cross-talk. Room IDs are the next schema addition.
 - **TURN.** Peers behind symmetric NAT need a relay; signaling alone is not
   enough for calls to connect reliably.
 - **Breach-corpus password screening** via the Have I Been Pwned range API,

@@ -18,6 +18,7 @@ import (
 	"cb-back/internal/config"
 	"cb-back/internal/database"
 	"cb-back/internal/httpx"
+	"cb-back/internal/rooms"
 	"cb-back/internal/signaling"
 )
 
@@ -98,12 +99,28 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		hub.Run(ctx)
 	}()
 
+	roomService := rooms.NewService(rooms.NewStore(pool))
+
 	mux := http.NewServeMux()
 	auth.NewHandlers(service, middleware, logger).Routes(mux, middleware.Require)
+	rooms.NewHandlers(roomService, logger).Routes(mux, middleware.Require)
+
+	// Translates the rooms package's not-found into the one the signaling
+	// handler answers 404 for, so neither package has to know the other.
+	resolveRoom := func(ctx context.Context, slug string) (string, error) {
+		room, err := roomService.BySlug(ctx, slug)
+		if errors.Is(err, rooms.ErrNotFound) {
+			return "", signaling.ErrRoomNotFound
+		}
+		if err != nil {
+			return "", err
+		}
+		return room.ID, nil
+	}
 
 	// The websocket handler authenticates internally so it can accept a
 	// single-use ticket, which Require does not know about.
-	mux.Handle("GET /ws", signaling.NewHandler(hub, logger, policy.CheckOrigin, middleware))
+	mux.Handle("GET /ws", signaling.NewHandler(hub, logger, policy.CheckOrigin, middleware, resolveRoom))
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, logger, http.StatusOK, map[string]any{"status": "ok", "clients": hub.ClientCount()})
