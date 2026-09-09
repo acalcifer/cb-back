@@ -88,6 +88,7 @@ func newTestServer(t *testing.T) *testServer {
 	authService := auth.NewService(auth.NewUserStore(testPool), sessions, auth.NewRateLimiter(testRDB), logger)
 	mw := auth.NewMiddleware(authService, logger, auth.MiddlewareOptions{
 		CookieName:  "cb_session",
+		IdleTTL:     time.Hour,
 		AbsoluteTTL: 24 * time.Hour,
 		TrustProxy:  true,
 	})

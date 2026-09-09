@@ -61,8 +61,12 @@ Email and password today, with the storage schema already shaped for passkeys.
   upgrades hashes silently on next login instead of invalidating them.
   Concurrent hashes are capped so a login flood cannot exhaust memory.
 - **Opaque session tokens**, 256 bits from `crypto/rand`. Redis stores only
-  their SHA-256, so a leaked Redis snapshot contains nothing replayable.
-  Sessions have a sliding idle TTL inside a fixed absolute lifetime.
+  their SHA-256, so a leaked Redis snapshot contains nothing replayable. The
+  session itself lives server-side; the cookie is only a handle to it.
+- **Staying signed in for a week.** The idle window slides on each
+  authenticated request, and `GET /api/auth/me` re-issues the cookie, so the
+  week counts from the user's last visit rather than from when they logged in.
+  The absolute lifetime never slides, so a stolen session still expires.
 - **Browsers** receive the session in an `HttpOnly`, `Secure`, `SameSite=Lax`
   cookie — unreadable from JavaScript, so an XSS bug cannot steal it. The token
   is never placed in a response body for browser clients.
@@ -173,7 +177,7 @@ curl -X POST localhost:8080/api/auth/register \
 | `ALLOWED_ORIGINS`      | unset     | Comma-separated browser origins; unset = same-host only; `*` disables |
 | `COOKIE_SECURE`        | `true`    | Set false only for local http development                             |
 | `SESSION_COOKIE_NAME`  | `cb_session` | Session cookie name                                                |
-| `SESSION_IDLE_TTL`     | `24h`     | Sliding inactivity window                                             |
+| `SESSION_IDLE_TTL`     | `168h`    | Sliding inactivity window (one week)                                  |
 | `SESSION_ABSOLUTE_TTL` | `720h`    | Hard session lifetime, never extended                                 |
 | `TRUST_PROXY`          | `false`   | Honour `X-Forwarded-For`; only behind a proxy that overwrites it      |
 | `LOG_LEVEL`            | `info`    | `debug`, `info`, `warn`, `error`; JSON on stdout                      |

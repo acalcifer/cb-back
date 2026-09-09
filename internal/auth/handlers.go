@@ -149,12 +149,17 @@ func (h *Handlers) logoutAll(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, h.logger, http.StatusOK, map[string]int{"revoked": revoked})
 }
 
+// me is the endpoint the app calls on start-up to answer "am I still signed
+// in?". It also re-issues the cookie, so the week of inactivity a user is
+// allowed counts from their last visit rather than from when they logged in.
 func (h *Handlers) me(w http.ResponseWriter, r *http.Request) {
 	id, ok := FromContext(r.Context())
 	if !ok {
 		httpx.Error(w, h.logger, http.StatusUnauthorized, "unauthenticated", "")
 		return
 	}
+
+	h.mw.RefreshCookie(w, r, id)
 	httpx.JSON(w, h.logger, http.StatusOK, sessionResponse{User: id.User, ExpiresAt: id.Session.ExpiresAt})
 }
 
@@ -217,7 +222,7 @@ func (h *Handlers) writeSession(w http.ResponseWriter, mode deliveryMode, user U
 		resp.Token = token
 		resp.TokenType = "Bearer"
 	} else {
-		h.mw.SetCookie(w, token)
+		h.mw.SetCookie(w, token, sess.ExpiresAt)
 	}
 
 	httpx.JSON(w, h.logger, status, resp)
