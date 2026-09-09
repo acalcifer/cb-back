@@ -1,1 +1,8 @@
 .idea
+.DS_Store
+
+# Compiled binary (matches the module name)
+/cb-back
+
+# Local secrets
+.env

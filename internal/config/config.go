@@ -1,0 +1,142 @@
+// Package config loads and validates runtime configuration from the
+// environment. Every value is resolved once at startup so a misconfiguration
+// fails the process immediately instead of the first request that needs it.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	Addr           string
+	LogLevel       slog.Level
+	AllowedOrigins string
+	TrustProxy     bool
+
+	DatabaseURL string
+	RedisURL    string
+
+	CookieName   string
+	CookieDomain string
+	CookieSecure bool
+
+	// SessionIdleTTL slides forward on each authenticated request;
+	// SessionAbsoluteTTL never does, so a stolen session cannot be kept alive
+	// indefinitely by an attacker who keeps using it.
+	SessionIdleTTL     time.Duration
+	SessionAbsoluteTTL time.Duration
+	WSTicketTTL        time.Duration
+}
+
+func Load() (Config, error) {
+	cfg := Config{
+		Addr:               envOr("ADDR", ":8080"),
+		AllowedOrigins:     os.Getenv("ALLOWED_ORIGINS"),
+		DatabaseURL:        os.Getenv("DATABASE_URL"),
+		RedisURL:           os.Getenv("REDIS_URL"),
+		CookieName:         envOr("SESSION_COOKIE_NAME", "cb_session"),
+		CookieDomain:       os.Getenv("SESSION_COOKIE_DOMAIN"),
+		SessionIdleTTL:     24 * time.Hour,
+		SessionAbsoluteTTL: 30 * 24 * time.Hour,
+		WSTicketTTL:        30 * time.Second,
+	}
+
+	var errs []error
+	collect := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	var err error
+	if cfg.LogLevel, err = parseLevel(envOr("LOG_LEVEL", "info")); err != nil {
+		collect(err)
+	}
+	if cfg.CookieSecure, err = parseBool("COOKIE_SECURE", true); err != nil {
+		collect(err)
+	}
+	if cfg.TrustProxy, err = parseBool("TRUST_PROXY", false); err != nil {
+		collect(err)
+	}
+	if cfg.SessionIdleTTL, err = parseDuration("SESSION_IDLE_TTL", cfg.SessionIdleTTL); err != nil {
+		collect(err)
+	}
+	if cfg.SessionAbsoluteTTL, err = parseDuration("SESSION_ABSOLUTE_TTL", cfg.SessionAbsoluteTTL); err != nil {
+		collect(err)
+	}
+
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		collect(errors.New("DATABASE_URL is required"))
+	}
+	if strings.TrimSpace(cfg.RedisURL) == "" {
+		collect(errors.New("REDIS_URL is required"))
+	}
+	if cfg.SessionIdleTTL > cfg.SessionAbsoluteTTL {
+		collect(fmt.Errorf("SESSION_IDLE_TTL (%s) must not exceed SESSION_ABSOLUTE_TTL (%s)",
+			cfg.SessionIdleTTL, cfg.SessionAbsoluteTTL))
+	}
+
+	if len(errs) > 0 {
+		return Config{}, errors.Join(errs...)
+	}
+	return cfg, nil
+}
+
+// WarnUnsafe reports settings that are fine locally but dangerous in
+// production, so they show up in logs rather than in an incident.
+func (c Config) WarnUnsafe(logger *slog.Logger) {
+	if !c.CookieSecure {
+		logger.Warn("COOKIE_SECURE=false sends the session cookie over plaintext HTTP; use it only for local development")
+	}
+	if c.TrustProxy {
+		logger.Warn("TRUST_PROXY=true honours X-Forwarded-For; only enable this behind a proxy that overwrites the header")
+	}
+}
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func parseLevel(raw string) (slog.Level, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(raw)); err != nil {
+		return slog.LevelInfo, fmt.Errorf("LOG_LEVEL %q: %w", raw, err)
+	}
+	return lvl, nil
+}
+
+func parseBool(key string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback, fmt.Errorf("%s %q: want true or false", key, raw)
+	}
+	return v, nil
+}
+
+func parseDuration(key string, fallback time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback, fmt.Errorf("%s %q: %w", key, raw, err)
+	}
+	if d <= 0 {
+		return fallback, fmt.Errorf("%s must be positive, got %s", key, d)
+	}
+	return d, nil
+}
