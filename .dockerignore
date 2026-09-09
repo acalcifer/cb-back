@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.env
+.env.*
+!.env.example
+*.md
+Dockerfile
+docker-compose.yml
+.DS_Store
+/cb-back
