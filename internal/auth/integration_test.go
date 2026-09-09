@@ -99,6 +99,7 @@ func newTestServer(t *testing.T) *testServer {
 	mw := NewMiddleware(svc, logger, MiddlewareOptions{
 		CookieName:   "cb_session",
 		CookieSecure: false,
+		IdleTTL:      time.Hour,
 		AbsoluteTTL:  24 * time.Hour,
 		// Each test presents its own X-Forwarded-For so per-IP rate limits
 		// stay isolated between tests.
@@ -565,6 +566,58 @@ func TestAuthEventsAreRecorded(t *testing.T) {
 	for i := range want {
 		if events[i] != want[i] {
 			t.Fatalf("events = %v, want %v", events, want)
+		}
+	}
+}
+
+// The app calls /me on start-up to decide whether the user is still signed in.
+// It must also slide the cookie, or the browser copy expires on the schedule
+// set at login even though the server-side session kept renewing.
+func TestSessionCheckRefreshesTheCookie(t *testing.T) {
+	ts := newTestServer(t)
+	email := uniqueEmail()
+
+	reg := ts.do(t, http.MethodPost, "/api/auth/register", map[string]string{
+		"email": email, "password": testPassword,
+	})
+	original := sessionCookie(t, reg)
+
+	me := ts.do(t, http.MethodGet, "/api/auth/me", nil, withCookie(original))
+	if me.StatusCode != http.StatusOK {
+		t.Fatalf("me: status = %d, want 200", me.StatusCode)
+	}
+
+	refreshed := sessionCookie(t, me)
+	if refreshed.Value != original.Value {
+		t.Fatal("the session token changed; only its lifetime should slide")
+	}
+	if !refreshed.HttpOnly {
+		t.Fatal("refreshed cookie lost HttpOnly")
+	}
+	if refreshed.MaxAge <= 0 {
+		t.Fatalf("refreshed cookie has MaxAge %d, want a positive lifetime", refreshed.MaxAge)
+	}
+}
+
+// A bearer client keeps its own token and has no cookie to update; sending it
+// one would hand a browser-style credential to a client that never asked.
+func TestBearerClientsGetNoCookie(t *testing.T) {
+	ts := newTestServer(t)
+	email := uniqueEmail()
+
+	ts.do(t, http.MethodPost, "/api/auth/register", map[string]string{"email": email, "password": testPassword})
+	login := ts.do(t, http.MethodPost, "/api/auth/login", map[string]string{
+		"email": email, "password": testPassword, "mode": "bearer",
+	})
+	token := decode[sessionResponse](t, login).Token
+
+	me := ts.do(t, http.MethodGet, "/api/auth/me", nil, withBearer(token))
+	if me.StatusCode != http.StatusOK {
+		t.Fatalf("me: status = %d, want 200", me.StatusCode)
+	}
+	for _, c := range me.Cookies() {
+		if c.Name == "cb_session" {
+			t.Fatal("a bearer request was issued a session cookie")
 		}
 	}
 }

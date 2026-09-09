@@ -61,8 +61,12 @@ Email and password today, with the storage schema already shaped for passkeys.
   upgrades hashes silently on next login instead of invalidating them.
   Concurrent hashes are capped so a login flood cannot exhaust memory.
 - **Opaque session tokens**, 256 bits from `crypto/rand`. Redis stores only
-  their SHA-256, so a leaked Redis snapshot contains nothing replayable.
-  Sessions have a sliding idle TTL inside a fixed absolute lifetime.
+  their SHA-256, so a leaked Redis snapshot contains nothing replayable. The
+  session itself lives server-side; the cookie is only a handle to it.
+- **Staying signed in for a week.** The idle window slides on each
+  authenticated request, and `GET /api/auth/me` re-issues the cookie, so the
+  week counts from the user's last visit rather than from when they logged in.
+  The absolute lifetime never slides, so a stolen session still expires.
 - **Browsers** receive the session in an `HttpOnly`, `Secure`, `SameSite=Lax`
   cookie — unreadable from JavaScript, so an XSS bug cannot steal it. The token
   is never placed in a response body for browser clients.
@@ -90,8 +94,9 @@ Email and password today, with the storage schema already shaped for passkeys.
 | POST   | `/api/auth/password`    | session   | Change password; revokes other sessions  |
 | POST   | `/api/auth/ws-ticket`   | session   | Mint a 30-second single-use ws ticket    |
 | POST   | `/api/rooms`            | session   | Create a room (server generates the slug) |
-| GET    | `/api/rooms`            | session   | Rooms you created                        |
+| GET    | `/api/rooms`            | session   | Public room directory, newest first      |
 | GET    | `/api/rooms/{slug}`     | session   | Resolve an invitation slug               |
+| DELETE | `/api/rooms/{slug}`     | session   | Delete a room (any signed-in user)       |
 | GET    | `/ws?room={slug}`       | session   | Websocket upgrade into a room            |
 | GET    | `/healthz`              | –         | Liveness plus connected client count     |
 | GET    | `/readyz`               | –         | Checks Postgres and Redis                |
@@ -109,16 +114,29 @@ which rooms exist.
 A room scopes the relay: a message reaches only clients connected to the same
 room, so two calls can run at once without hearing each other.
 
-**Access model — knowing the slug is the invitation**, like a meeting link. Any
-authenticated user holding a slug may join. That is why slugs are generated
-rather than chosen: a user-picked slug would be guessable, and guessing one is
-how an uninvited participant would join a call. Slugs avoid vowels and
-look-alike characters, so they survive being read aloud.
+**Access model — rooms are public.** Every signed-in user sees every room in the
+directory and may join any of them; the directory is how someone finds a call.
+Slugs are still generated rather than chosen, so a link can be shared directly
+without colliding with an existing room, and they avoid vowels and look-alike
+characters so they survive being read aloud.
+
+Each directory row carries the creator's display name, never their email
+address, so the list is readable without becoming a user-enumeration endpoint.
+
+Deletion is open to any signed-in user, matching the open directory: shared
+housekeeping for a shared list. The trade-off is that someone can remove a room
+others are using — restricting it to the creator is a one-line change to the
+query if that becomes a problem. Deleting does not disconnect anyone already in
+the room; their websockets stay up until they leave, and the room simply stops
+appearing in the directory and can no longer be joined.
+There is deliberately no private-room concept yet: if one is added, it belongs
+in a `visibility` column plus a `room_members` table, and the directory query
+becomes the place that enforces it.
 
 Clients send:
 
 ```json
-{ "type": "offer|answer|candidate|bye", "to": "<peer user id>", "payload": { } }
+{ "type": "offer|answer|candidate|bye|chat", "to": "<peer user id>", "payload": { } }
 ```
 
 `to` is optional; omitting it fans the message out to the whole room, which is
@@ -130,9 +148,20 @@ what a client does before it knows who is present. The server sends:
 
 **`from` is stamped by the server** from the authenticated connection, and any
 `from` in a client's own frame is discarded. A client that could name its own
-sender could inject an SDP offer as another participant. Unknown message types
-are rejected rather than relayed, so the set of frames that can cross the hub
-is exactly the set above.
+sender could inject an SDP offer — or a chat message — as another participant.
+Unknown message types are rejected rather than relayed, so the set of frames
+that can cross the hub is exactly the set above.
+
+`chat` rides the same relay as the WebRTC frames. Chat is **not persisted**: it
+lives for the duration of the connection, like the chat panel in a meeting. If
+history is wanted later it needs its own table, and the relay becomes a write
+plus a fan-out rather than a fan-out alone.
+
+Each connection has an inbound message budget: a burst of 120 with sustained
+refill at 60/second. ICE candidates arrive in bursts of tens during
+negotiation, so a real call never approaches it. A connection that does is
+closed rather than silently throttled, because a dropped ICE candidate breaks a
+call in a way that is very hard to diagnose from the client.
 
 On top of the relay the server emits presence, without which a client would not
 know whom to call: `welcome` (sent on join, listing everyone already present),
@@ -156,7 +185,7 @@ curl -X POST localhost:8080/api/auth/register \
 | `ALLOWED_ORIGINS`      | unset     | Comma-separated browser origins; unset = same-host only; `*` disables |
 | `COOKIE_SECURE`        | `true`    | Set false only for local http development                             |
 | `SESSION_COOKIE_NAME`  | `cb_session` | Session cookie name                                                |
-| `SESSION_IDLE_TTL`     | `24h`     | Sliding inactivity window                                             |
+| `SESSION_IDLE_TTL`     | `168h`    | Sliding inactivity window (one week)                                  |
 | `SESSION_ABSOLUTE_TTL` | `720h`    | Hard session lifetime, never extended                                 |
 | `TRUST_PROXY`          | `false`   | Honour `X-Forwarded-For`; only behind a proxy that overwrites it      |
 | `LOG_LEVEL`            | `info`    | `debug`, `info`, `warn`, `error`; JSON on stdout                      |
@@ -166,9 +195,18 @@ curl -X POST localhost:8080/api/auth/register \
 ```sh
 go test -race ./...        # unit tests; integration tests skip
 
-# with docker compose up:
+# with docker compose up — .env already points TEST_* at isolated storage:
 set -a; . ./.env; set +a
-TEST_DATABASE_URL="$DATABASE_URL" TEST_REDIS_URL="$REDIS_URL" go test -race ./...
+go test -race ./...
+```
+
+The integration tests create real users and rooms, so they run against a
+separate `cbback_test` database and Redis index 1. Pointing them at the
+development database instead fills the room directory with fixtures. The
+database is created on first `docker compose up`; on an existing volume:
+
+```sh
+docker compose exec postgres createdb -U cbback cbback_test
 ```
 
 The auth integration tests run against the compose Postgres and Redis and

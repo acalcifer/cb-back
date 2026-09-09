@@ -88,6 +88,7 @@ func newTestServer(t *testing.T) *testServer {
 	authService := auth.NewService(auth.NewUserStore(testPool), sessions, auth.NewRateLimiter(testRDB), logger)
 	mw := auth.NewMiddleware(authService, logger, auth.MiddlewareOptions{
 		CookieName:  "cb_session",
+		IdleTTL:     time.Hour,
 		AbsoluteTTL: 24 * time.Hour,
 		TrustProxy:  true,
 	})
@@ -236,14 +237,16 @@ func TestEmptyBodyGetsADefaultName(t *testing.T) {
 	}
 }
 
-func TestListReturnsOnlyYourOwnRooms(t *testing.T) {
+// The directory is public: a user must be able to see rooms they did not
+// create, or there is nothing to join.
+func TestListIsAPublicDirectory(t *testing.T) {
 	ts := newTestServer(t)
 
 	mine := ts.signIn(t)
 	theirs := ts.signIn(t)
 
-	created := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Mine"}, mine))
-	ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Theirs"}, theirs)
+	ownRoom := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Mine"}, mine))
+	otherRoom := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Theirs"}, theirs))
 
 	resp := ts.do(t, http.MethodGet, "/api/rooms", nil, mine)
 	if resp.StatusCode != http.StatusOK {
@@ -254,8 +257,38 @@ func TestListReturnsOnlyYourOwnRooms(t *testing.T) {
 		Rooms []Room `json:"rooms"`
 	}](t, resp)
 
-	if len(list.Rooms) != 1 || list.Rooms[0].ID != created.ID {
-		t.Fatalf("rooms = %+v, want only the caller's own room", list.Rooms)
+	found := make(map[string]Room, len(list.Rooms))
+	for _, r := range list.Rooms {
+		found[r.ID] = r
+	}
+
+	if _, ok := found[ownRoom.ID]; !ok {
+		t.Fatal("directory omitted the caller's own room")
+	}
+	other, ok := found[otherRoom.ID]
+	if !ok {
+		t.Fatal("directory omitted another user's room; it is supposed to be public")
+	}
+	if other.CreatedByName == "" {
+		t.Fatal("directory row has no creator name to display")
+	}
+}
+
+// The directory is readable, but it must not turn into a user-enumeration
+// endpoint: display names are fine, email addresses are not.
+func TestDirectoryDoesNotLeakEmailAddresses(t *testing.T) {
+	ts := newTestServer(t)
+
+	cookie := ts.signIn(t)
+	ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Public"}, cookie)
+
+	resp := ts.do(t, http.MethodGet, "/api/rooms", nil, cookie)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if bytes.Contains(body, []byte("@example.com")) {
+		t.Fatalf("directory response contains an email address: %s", body)
 	}
 }
 
@@ -323,5 +356,62 @@ func TestOverlongNameRejected(t *testing.T) {
 	resp := ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": string(long)}, cookie)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestDeleteRemovesTheRoom(t *testing.T) {
+	ts := newTestServer(t)
+	cookie := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Temp"}, cookie))
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: status = %d, want 204", resp.StatusCode)
+	}
+	if resp := ts.do(t, http.MethodGet, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("room still resolves after delete: status = %d", resp.StatusCode)
+	}
+}
+
+// Deleting twice must not report success the second time, or a client cannot
+// tell a real deletion from a stale link.
+func TestDeleteIsNotSilentlyIdempotent(t *testing.T) {
+	ts := newTestServer(t)
+	cookie := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", nil, cookie))
+	ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, cookie)
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second delete: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// Housekeeping is shared, matching the open directory: anyone signed in may
+// remove any room, including one they did not create.
+func TestAnySignedInUserCanDeleteAnyRoom(t *testing.T) {
+	ts := newTestServer(t)
+
+	owner := ts.signIn(t)
+	stranger := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", map[string]string{"name": "Shared"}, owner))
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, stranger); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("stranger delete: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestDeleteRequiresASession(t *testing.T) {
+	ts := newTestServer(t)
+	cookie := ts.signIn(t)
+
+	room := decodeBody[Room](t, ts.do(t, http.MethodPost, "/api/rooms", nil, cookie))
+
+	if resp := ts.do(t, http.MethodDelete, "/api/rooms/"+room.Slug, nil, nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous delete: status = %d, want 401", resp.StatusCode)
+	}
+	if resp := ts.do(t, http.MethodGet, "/api/rooms/"+room.Slug, nil, cookie); resp.StatusCode != http.StatusOK {
+		t.Fatal("the room was removed by an unauthenticated request")
 	}
 }

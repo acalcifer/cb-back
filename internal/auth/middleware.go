@@ -35,6 +35,7 @@ type Middleware struct {
 	cookieName   string
 	cookieDomain string
 	cookieSecure bool
+	idleTTL      time.Duration
 	absoluteTTL  time.Duration
 	trustProxy   bool
 }
@@ -43,6 +44,7 @@ type MiddlewareOptions struct {
 	CookieName   string
 	CookieDomain string
 	CookieSecure bool
+	IdleTTL      time.Duration
 	AbsoluteTTL  time.Duration
 	TrustProxy   bool
 }
@@ -54,6 +56,7 @@ func NewMiddleware(svc *Service, logger *slog.Logger, opts MiddlewareOptions) *M
 		cookieName:   opts.CookieName,
 		cookieDomain: opts.CookieDomain,
 		cookieSecure: opts.CookieSecure,
+		idleTTL:      opts.IdleTTL,
 		absoluteTTL:  opts.AbsoluteTTL,
 		trustProxy:   opts.TrustProxy,
 	}
@@ -153,21 +156,50 @@ func (m *Middleware) ClientIP(r *http.Request) string { return httpx.ClientIP(r,
 // SetCookie writes the session cookie.
 //
 // HttpOnly keeps the token out of reach of JavaScript, so an XSS bug cannot
-// exfiltrate it. Secure keeps it off plaintext connections. SameSite=Lax stops
-// it riding along with cross-site POSTs, which is the first half of the CSRF
-// defence — httpx.CSRF is the second.
-func (m *Middleware) SetCookie(w http.ResponseWriter, token string) {
+// exfiltrate it and no frontend code ever handles it. Secure keeps it off
+// plaintext connections. SameSite=Lax stops it riding along with cross-site
+// POSTs, which is the first half of the CSRF defence — httpx.CSRF is the
+// second.
+//
+// The cookie expires with the idle window rather than the absolute cap, so the
+// browser stops presenting a token the server would refuse anyway. It never
+// outlives the session it refers to.
+func (m *Middleware) SetCookie(w http.ResponseWriter, token string, sessionExpiry time.Time) {
+	expires := time.Now().Add(m.idleTTL)
+	if !sessionExpiry.IsZero() && sessionExpiry.Before(expires) {
+		expires = sessionExpiry
+	}
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cookieName,
 		Value:    token,
 		Path:     "/",
 		Domain:   m.cookieDomain,
-		Expires:  time.Now().Add(m.absoluteTTL),
-		MaxAge:   int(m.absoluteTTL.Seconds()),
+		Expires:  expires,
+		MaxAge:   int(time.Until(expires).Seconds()),
 		HttpOnly: true,
 		Secure:   m.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+// RefreshCookie re-issues the cookie so its lifetime slides with the session's
+// idle window.
+//
+// Without this the server-side session keeps sliding while the browser copy
+// still expires on the schedule set at login, and a user who visits every few
+// days is signed out anyway when that original deadline passes.
+//
+// Only cookie-authenticated requests are refreshed: a bearer client stores its
+// own token and has no cookie to update.
+func (m *Middleware) RefreshCookie(w http.ResponseWriter, r *http.Request, id Identity) {
+	if r.Header.Get("Authorization") != "" {
+		return
+	}
+	if _, err := r.Cookie(m.cookieName); err != nil {
+		return
+	}
+	m.SetCookie(w, id.Token, id.Session.ExpiresAt)
 }
 
 func (m *Middleware) ClearCookie(w http.ResponseWriter) {

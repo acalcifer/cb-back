@@ -88,6 +88,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		CookieName:   cfg.CookieName,
 		CookieDomain: cfg.CookieDomain,
 		CookieSecure: cfg.CookieSecure,
+		IdleTTL:      cfg.SessionIdleTTL,
 		AbsoluteTTL:  cfg.SessionAbsoluteTTL,
 		TrustProxy:   cfg.TrustProxy,
 	})

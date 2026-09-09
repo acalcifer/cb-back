@@ -161,6 +161,8 @@ func (c *Client) readPump() {
 		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
+	budget := newTokenBucket(messageBurst, messagesPerSecond, time.Now())
+
 	for {
 		msgType, data, err := c.conn.ReadMessage()
 		if err != nil {
@@ -177,6 +179,14 @@ func (c *Client) readPump() {
 		if msgType != websocket.TextMessage {
 			c.logger.Debug("rejecting non-text frame", "type", msgType)
 			c.writeClose(websocket.CloseUnsupportedData, "text frames only")
+			return
+		}
+
+		// Closing beats silently dropping: a discarded ICE candidate breaks a
+		// call in a way that is very hard to diagnose from the client.
+		if !budget.allow(time.Now()) {
+			c.logger.Warn("client exceeded the message rate")
+			c.writeClose(websocket.ClosePolicyViolation, "message rate exceeded")
 			return
 		}
 

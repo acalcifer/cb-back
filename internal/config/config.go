@@ -26,9 +26,10 @@ type Config struct {
 	CookieDomain string
 	CookieSecure bool
 
-	// SessionIdleTTL slides forward on each authenticated request;
-	// SessionAbsoluteTTL never does, so a stolen session cannot be kept alive
-	// indefinitely by an attacker who keeps using it.
+	// SessionIdleTTL slides forward on each authenticated request, so a user
+	// who visits at least weekly stays signed in. SessionAbsoluteTTL never
+	// slides, so a stolen session cannot be kept alive indefinitely by an
+	// attacker who keeps using it.
 	SessionIdleTTL     time.Duration
 	SessionAbsoluteTTL time.Duration
 	WSTicketTTL        time.Duration
@@ -42,7 +43,7 @@ func Load() (Config, error) {
 		RedisURL:           os.Getenv("REDIS_URL"),
 		CookieName:         envOr("SESSION_COOKIE_NAME", "cb_session"),
 		CookieDomain:       os.Getenv("SESSION_COOKIE_DOMAIN"),
-		SessionIdleTTL:     24 * time.Hour,
+		SessionIdleTTL:     7 * 24 * time.Hour,
 		SessionAbsoluteTTL: 30 * 24 * time.Hour,
 		WSTicketTTL:        30 * time.Second,
 	}
