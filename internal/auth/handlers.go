@@ -34,6 +34,30 @@ func (h *Handlers) Routes(mux *http.ServeMux, require func(http.Handler) http.Ha
 	mux.Handle("POST /api/auth/logout-all", require(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("POST /api/auth/password", require(http.HandlerFunc(h.changePassword)))
 	mux.Handle("POST /api/auth/ws-ticket", require(http.HandlerFunc(h.wsTicket)))
+
+	mux.Handle("GET /api/users", require(http.HandlerFunc(h.contacts)))
+}
+
+const contactsLimit = 200
+
+// contacts is the address book. Like the room directory it shows display names
+// to any signed-in user and never email addresses, so it is readable without
+// becoming an enumeration endpoint for account identifiers people log in with.
+func (h *Handlers) contacts(w http.ResponseWriter, r *http.Request) {
+	id, ok := FromContext(r.Context())
+	if !ok {
+		httpx.Error(w, h.logger, http.StatusUnauthorized, "unauthenticated", "")
+		return
+	}
+
+	list, err := h.svc.users.Contacts(r.Context(), id.User.ID, contactsLimit)
+	if err != nil {
+		h.logger.Error("list contacts failed", "error", err)
+		httpx.Error(w, h.logger, http.StatusInternalServerError, "internal_error", "")
+		return
+	}
+
+	httpx.JSON(w, h.logger, http.StatusOK, map[string]any{"users": list})
 }
 
 // deliveryMode decides where the session token goes.

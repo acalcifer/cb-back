@@ -10,6 +10,8 @@ internal/config/     environment parsing, validated once at startup
 internal/database/   pgx pool + embedded SQL migrations
 internal/auth/       Argon2id passwords, Redis sessions, rate limits, handlers
 internal/signaling/  websocket hub; relays JSON between authenticated clients
+internal/inbox/      per-user websocket that pushes invites to idle clients
+internal/invites/    ring, cancel and decline endpoints
 internal/httpx/      origin policy, CSRF guard, JSON + panic-recovery helpers
 ```
 
@@ -97,7 +99,12 @@ Email and password today, with the storage schema already shaped for passkeys.
 | GET    | `/api/rooms`            | session   | Public room directory, newest first      |
 | GET    | `/api/rooms/{slug}`     | session   | Resolve an invitation slug               |
 | DELETE | `/api/rooms/{slug}`     | session   | Delete a room (any signed-in user)       |
+| POST   | `/api/rooms/{slug}/invites`         | session | Ring a user into a room          |
+| POST   | `/api/rooms/{slug}/invites/cancel`  | session | Stop ringing them                |
+| POST   | `/api/rooms/{slug}/invites/decline` | session | Refuse an invite                 |
+| GET    | `/api/users`            | session   | Address book: other users' display names |
 | GET    | `/ws?room={slug}`       | session   | Websocket upgrade into a room            |
+| GET    | `/ws/inbox`             | session   | Per-user websocket that carries invites  |
 | GET    | `/healthz`              | –         | Liveness plus connected client count     |
 | GET    | `/readyz`               | –         | Checks Postgres and Redis                |
 
@@ -168,6 +175,41 @@ know whom to call: `welcome` (sent on join, listing everyone already present),
 `peer-joined`, and `peer-left`. `peer-left` also fires when a client is dropped
 for failing to drain its queue, so peers tear down the dead connection instead
 of waiting on it.
+
+## Ringing: the inbox and invites
+
+The room relay only reaches people already in a call. To ring someone, each
+signed-in client also holds `GET /ws/inbox` open while idle — the Android app
+keeps it in a foreground service. The server pushes to every inbox connection
+the user has:
+
+```json
+{ "type": "invite|invite-cancelled|invite-declined",
+  "room": { "slug": "...", "name": "..." },
+  "from": { "id": "<user id>", "display_name": "..." } }
+```
+
+A direct call is a room with two people in it. The caller creates a room, joins
+it, and posts `{"user_id": "..."}` to `/api/rooms/{slug}/invites`; the callee's
+phone rings, and answering joins the same room. A cancel goes to the callee when
+the caller gives up, a decline goes back to the caller. `from` is stamped by the
+server, as on the room relay.
+
+**Invites are pushes, not records.** Nothing is stored: a user with no inbox
+open misses the call, and the response's `delivered` count (the number of their
+connections that received it) is how the caller finds that out and shows "not
+online" instead of ringing into the void. Waking a phone that the OS has frozen
+needs a push service (FCM); that is the upgrade path if a held-open socket
+proves unreliable on some devices.
+
+Cancels and declines are accepted after the room is gone, because a caller who
+hangs up may delete the room before the cancel lands. All three share a
+per-sender limit of 30 a minute, so a signed-in user cannot make someone's phone
+ring on a loop.
+
+`GET /api/users` lists every other enabled user's id and display name — never
+the email — so a client has someone to call. It follows the room directory's
+model: visible to any signed-in user.
 
 ```sh
 curl -X POST localhost:8080/api/auth/register \

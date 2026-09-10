@@ -118,6 +118,42 @@ func (s *UserStore) ByID(ctx context.Context, id string) (User, error) {
 	return u, nil
 }
 
+// Contact is a user as other users see them: enough to call them, and never
+// their email address.
+type Contact struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+}
+
+// Contacts lists every enabled user except the caller, by display name. It is
+// the address book a client rings people from.
+func (s *UserStore) Contacts(ctx context.Context, exceptUserID string, limit int) ([]Contact, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, display_name
+		FROM users
+		WHERE disabled_at IS NULL AND id <> $1
+		ORDER BY display_name, id
+		LIMIT $2`, exceptUserID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select contacts: %w", err)
+	}
+	defer rows.Close()
+
+	// Non-nil so an empty result encodes as [] rather than null.
+	list := make([]Contact, 0)
+	for rows.Next() {
+		var c Contact
+		if err := rows.Scan(&c.ID, &c.DisplayName); err != nil {
+			return nil, fmt.Errorf("scan contact: %w", err)
+		}
+		list = append(list, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate contacts: %w", err)
+	}
+	return list, nil
+}
+
 // CredentialByUserID returns the stored hash, used when confirming the current
 // password before changing it.
 func (s *UserStore) CredentialByUserID(ctx context.Context, userID string) (string, error) {

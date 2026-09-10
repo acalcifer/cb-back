@@ -621,3 +621,58 @@ func TestBearerClientsGetNoCookie(t *testing.T) {
 		}
 	}
 }
+
+// The address book is how a client finds someone to ring. It must list other
+// people, omit the caller, and — like the room directory — never carry an
+// email address.
+func TestContactsListOthersWithoutEmails(t *testing.T) {
+	ts := newTestServer(t)
+
+	self := ts.do(t, http.MethodPost, "/api/auth/register", map[string]string{
+		"email": uniqueEmail(), "password": testPassword, "mode": "bearer",
+	})
+	me := decode[sessionResponse](t, self)
+
+	other := decode[sessionResponse](t, ts.do(t, http.MethodPost, "/api/auth/register", map[string]string{
+		"email": uniqueEmail(), "password": testPassword, "display_name": "Someone Else",
+	}))
+
+	resp := ts.do(t, http.MethodGet, "/api/users", nil, withBearer(me.Token))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if bytes.Contains(raw, []byte("@example.com")) {
+		t.Fatalf("contacts response contains an email address: %s", raw)
+	}
+
+	var list struct {
+		Users []Contact `json:"users"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var sawOther bool
+	for _, c := range list.Users {
+		if c.ID == me.User.ID {
+			t.Fatal("contacts include the caller")
+		}
+		if c.ID == other.User.ID {
+			sawOther = true
+			if c.DisplayName != "Someone Else" {
+				t.Fatalf("display name = %q", c.DisplayName)
+			}
+		}
+	}
+	if !sawOther {
+		t.Fatal("contacts omitted another user")
+	}
+
+	if anon := ts.do(t, http.MethodGet, "/api/users", nil); anon.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous contacts: status = %d, want 401", anon.StatusCode)
+	}
+}

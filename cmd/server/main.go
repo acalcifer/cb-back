@@ -18,6 +18,8 @@ import (
 	"cb-back/internal/config"
 	"cb-back/internal/database"
 	"cb-back/internal/httpx"
+	"cb-back/internal/inbox"
+	"cb-back/internal/invites"
 	"cb-back/internal/rooms"
 	"cb-back/internal/signaling"
 )
@@ -83,7 +85,9 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	}
 
 	sessions := auth.NewSessionStore(rdb, cfg.SessionIdleTTL, cfg.SessionAbsoluteTTL, cfg.WSTicketTTL)
-	service := auth.NewService(auth.NewUserStore(pool), sessions, auth.NewRateLimiter(rdb), logger)
+	users := auth.NewUserStore(pool)
+	limiter := auth.NewRateLimiter(rdb)
+	service := auth.NewService(users, sessions, limiter, logger)
 	middleware := auth.NewMiddleware(service, logger, auth.MiddlewareOptions{
 		CookieName:   cfg.CookieName,
 		CookieDomain: cfg.CookieDomain,
@@ -101,10 +105,12 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	}()
 
 	roomService := rooms.NewService(rooms.NewStore(pool))
+	inboxHub := inbox.NewHub(logger)
 
 	mux := http.NewServeMux()
 	auth.NewHandlers(service, middleware, logger).Routes(mux, middleware.Require)
 	rooms.NewHandlers(roomService, logger).Routes(mux, middleware.Require)
+	invites.NewHandlers(roomService, users, limiter, inboxHub, logger).Routes(mux, middleware.Require)
 
 	// Translates the rooms package's not-found into the one the signaling
 	// handler answers 404 for, so neither package has to know the other.
@@ -122,9 +128,14 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	// The websocket handler authenticates internally so it can accept a
 	// single-use ticket, which Require does not know about.
 	mux.Handle("GET /ws", signaling.NewHandler(hub, logger, policy.CheckOrigin, middleware, resolveRoom))
+	mux.Handle("GET /ws/inbox", inbox.NewHandler(inboxHub, logger, policy.CheckOrigin, middleware))
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		httpx.JSON(w, logger, http.StatusOK, map[string]any{"status": "ok", "clients": hub.ClientCount()})
+		httpx.JSON(w, logger, http.StatusOK, map[string]any{
+			"status":  "ok",
+			"clients": hub.ClientCount(),
+			"inboxes": inboxHub.ConnectionCount(),
+		})
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		readyCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -185,6 +196,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	defer cancel()
 
 	shutdownErr := srv.Shutdown(shutdownCtx)
+	inboxHub.Shutdown()
 
 	select {
 	case <-hubDone:
