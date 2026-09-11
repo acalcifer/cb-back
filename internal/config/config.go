@@ -33,6 +33,11 @@ type Config struct {
 	SessionIdleTTL     time.Duration
 	SessionAbsoluteTTL time.Duration
 	WSTicketTTL        time.Duration
+
+	// Both empty disables TURN; half-set is a startup error.
+	TURNSecret        string
+	TURNURLs          []string
+	TURNCredentialTTL time.Duration
 }
 
 func Load() (Config, error) {
@@ -46,6 +51,10 @@ func Load() (Config, error) {
 		SessionIdleTTL:     7 * 24 * time.Hour,
 		SessionAbsoluteTTL: 30 * 24 * time.Hour,
 		WSTicketTTL:        30 * time.Second,
+		TURNSecret:         envOr("TURN_SECRET", ""),
+		TURNURLs:           splitCSV(os.Getenv("TURN_URLS")),
+		// coturn rejects allocation refreshes once this passes, dropping a relayed call.
+		TURNCredentialTTL: 24 * time.Hour,
 	}
 
 	var errs []error
@@ -70,6 +79,13 @@ func Load() (Config, error) {
 	}
 	if cfg.SessionAbsoluteTTL, err = parseDuration("SESSION_ABSOLUTE_TTL", cfg.SessionAbsoluteTTL); err != nil {
 		collect(err)
+	}
+	if cfg.TURNCredentialTTL, err = parseDuration("TURN_CREDENTIAL_TTL", cfg.TURNCredentialTTL); err != nil {
+		collect(err)
+	}
+
+	if (cfg.TURNSecret == "") != (len(cfg.TURNURLs) == 0) {
+		collect(errors.New("TURN_SECRET and TURN_URLS must both be set, or both left empty to disable TURN"))
 	}
 
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
@@ -125,6 +141,18 @@ func parseBool(key string, fallback bool) (bool, error) {
 		return fallback, fmt.Errorf("%s %q: want true or false", key, raw)
 	}
 	return v, nil
+}
+
+// splitCSV parses a comma-separated environment value into its non-empty,
+// trimmed entries. An empty or all-blank input yields a nil slice.
+func splitCSV(raw string) []string {
+	var out []string
+	for _, v := range strings.Split(raw, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func parseDuration(key string, fallback time.Duration) (time.Duration, error) {

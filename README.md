@@ -230,6 +230,11 @@ curl -X POST localhost:8080/api/auth/register \
 | `SESSION_IDLE_TTL`     | `168h`    | Sliding inactivity window (one week)                                  |
 | `SESSION_ABSOLUTE_TTL` | `720h`    | Hard session lifetime, never extended                                 |
 | `TRUST_PROXY`          | `false`   | Honour `X-Forwarded-For`; only behind a proxy that overwrites it      |
+| `TURN_SECRET`          | unset     | Secret shared with coturn; set together with `TURN_URLS` or not at all |
+| `TURN_URLS`            | unset     | Comma-separated ICE server URLs returned to clients                   |
+| `TURN_CREDENTIAL_TTL`  | `24h`     | TURN credential lifetime; a relayed call drops when it runs out       |
+| `TURN_REALM`           | `cb-back` | coturn only: authentication realm                                     |
+| `TURN_PUBLIC_IP`       | required with coturn | coturn only: the VPS public IPv4 advertised to clients     |
 | `LOG_LEVEL`            | `info`    | `debug`, `info`, `warn`, `error`; JSON on stdout                      |
 
 ## Tests
@@ -255,13 +260,31 @@ The auth integration tests run against the compose Postgres and Redis and
 cover the cookie and bearer flows, lockout, session revocation, CSRF, and the
 enumeration and token-storage properties described above.
 
+## TURN relay
+
+Phones on mobile data sit behind carrier-grade NAT, which defeats a direct
+peer-to-peer path, so calls fall back to relaying media through coturn.
+
+`GET /api/turn-credentials` (authenticated) returns an `RTCIceServer`-shaped
+object — `urls`, `username`, `credential`, `ttl` — that a client passes
+straight into its peer connection's `iceServers`. Credentials use coturn's
+shared-secret scheme: the username is `<expiry>:<user id>` and the credential
+is `base64(HMAC-SHA1(TURN_SECRET, username))`, so coturn verifies them without
+a shared credential store, and a credential lifted from a device expires on
+its own. Fetch fresh credentials before each call. With `TURN_SECRET` and
+`TURN_URLS` unset the endpoint answers 503 `turn_disabled`.
+
+coturn runs under the `api` compose profile with host networking, because it
+allocates relay ports per client and Docker port mapping cannot forward those.
+Open `3478/tcp`, `3478/udp` and `49160-49200/udp` on the VPS firewall. It
+refuses to relay to private and loopback ranges, so a signed-in user cannot
+use it to reach Postgres, Redis or anything else on the host's network.
+
 ## Not built yet
 
 - **Email verification and password reset.** Until verification exists,
   registration returns 409 on a duplicate address, which does reveal that the
   address is registered; per-IP registration limits are what currently keep
   that from being usable in bulk.
-- **TURN.** Peers behind symmetric NAT need a relay; signaling alone is not
-  enough for calls to connect reliably.
 - **Breach-corpus password screening** via the Have I Been Pwned range API,
   which checks a password without transmitting it.

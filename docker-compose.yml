@@ -73,6 +73,9 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_CREDENTIAL_TTL: ${TURN_CREDENTIAL_TTL:-24h}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -80,6 +83,45 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # Relays call media when carrier-grade NAT blocks a direct path. Host
+  # networking because coturn picks relay ports per client, which Docker port
+  # mapping cannot forward. Open 3478/tcp, 3478/udp and 49160-49200/udp.
+  coturn:
+    profiles: ["api"]
+    image: coturn/coturn:4.18-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_PUBLIC_IP: ${TURN_PUBLIC_IP:-}
+      TURN_REALM: ${TURN_REALM:-cb-back}
+    # Required vars are checked here, not with ${VAR:?}: Compose interpolates
+    # every service, so that would break `docker compose up` without the profile.
+    # Denied peer ranges stop a signed-in user relaying into Postgres or Redis.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        : "$${TURN_SECRET:?TURN_SECRET is required}" "$${TURN_PUBLIC_IP:?TURN_PUBLIC_IP is required}"
+        exec turnserver \
+          --listening-port=3478 \
+          --min-port=49160 --max-port=49200 \
+          --external-ip="$$TURN_PUBLIC_IP" \
+          --realm="$$TURN_REALM" \
+          --use-auth-secret --static-auth-secret="$$TURN_SECRET" \
+          --fingerprint \
+          --no-tls \
+          --no-tcp-relay --no-multicast-peers \
+          --denied-peer-ip=0.0.0.0-0.255.255.255 \
+          --denied-peer-ip=10.0.0.0-10.255.255.255 \
+          --denied-peer-ip=100.64.0.0-100.127.255.255 \
+          --denied-peer-ip=127.0.0.0-127.255.255.255 \
+          --denied-peer-ip=169.254.0.0-169.254.255.255 \
+          --denied-peer-ip=172.16.0.0-172.31.255.255 \
+          --denied-peer-ip=192.168.0.0-192.168.255.255 \
+          --denied-peer-ip=::1 \
+          --log-file=stdout --simple-log
 
 volumes:
   postgres-data:
