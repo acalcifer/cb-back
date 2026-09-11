@@ -75,7 +75,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TURN_SECRET: ${TURN_SECRET:-}
       TURN_URLS: ${TURN_URLS:-}
-      TURN_CREDENTIAL_TTL: ${TURN_CREDENTIAL_TTL:-1h}
+      TURN_CREDENTIAL_TTL: ${TURN_CREDENTIAL_TTL:-24h}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

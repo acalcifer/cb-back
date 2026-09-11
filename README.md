@@ -232,7 +232,7 @@ curl -X POST localhost:8080/api/auth/register \
 | `TRUST_PROXY`          | `false`   | Honour `X-Forwarded-For`; only behind a proxy that overwrites it      |
 | `TURN_SECRET`          | unset     | Secret shared with coturn; set together with `TURN_URLS` or not at all |
 | `TURN_URLS`            | unset     | Comma-separated ICE server URLs returned to clients                   |
-| `TURN_CREDENTIAL_TTL`  | `1h`      | Lifetime of minted TURN credentials                                   |
+| `TURN_CREDENTIAL_TTL`  | `24h`     | TURN credential lifetime; a relayed call drops when it runs out       |
 | `TURN_REALM`           | `cb-back` | coturn only: authentication realm                                     |
 | `TURN_PUBLIC_IP`       | required with coturn | coturn only: the VPS public IPv4 advertised to clients     |
 | `LOG_LEVEL`            | `info`    | `debug`, `info`, `warn`, `error`; JSON on stdout                      |

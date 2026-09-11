@@ -53,7 +53,8 @@ func Load() (Config, error) {
 		WSTicketTTL:        30 * time.Second,
 		TURNSecret:         envOr("TURN_SECRET", ""),
 		TURNURLs:           splitCSV(os.Getenv("TURN_URLS")),
-		TURNCredentialTTL:  time.Hour,
+		// coturn rejects allocation refreshes once this passes, dropping a relayed call.
+		TURNCredentialTTL: 24 * time.Hour,
 	}
 
 	var errs []error
